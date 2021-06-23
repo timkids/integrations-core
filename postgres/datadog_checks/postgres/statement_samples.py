@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from concurrent.futures.thread import ThreadPoolExecutor
@@ -50,6 +51,8 @@ PG_STAT_ACTIVITY_QUERY = re.sub(
 ).strip()
 
 EXPLAIN_VALIDATION_QUERY = "SELECT * FROM pg_stat_activity"
+
+MAX_ACTIVITY_QUERY_SIZE_QUERY = "select setting from pg_settings where name='track_activity_query_size'"
 
 
 class DBExplainError(Enum):
@@ -271,9 +274,10 @@ class PostgresStatementSamples(object):
     def _collect_statement_samples(self):
         self._rate_limiter.sleep()
         start_time = time.time()
+        max_query_size = self._get_query_max_text_size()
         rows = self._get_new_pg_stat_activity()
         rows = self._filter_valid_statement_rows(rows)
-        events = self._explain_pg_stat_activity(rows)
+        events = self._explain_pg_stat_activity(max_query_size, rows)
         submitted_count = 0
         for e in events:
             self._check.database_monitoring_query_sample(json.dumps(e, default=default_json_event_encoding))
@@ -385,7 +389,7 @@ class PostgresStatementSamples(object):
             )
             return None, DBExplainError.database_error, e
 
-    def _collect_plan_for_statement(self, row):
+    def _collect_plan_for_statement(self, max_query_size, row):
         try:
             obfuscated_statement = datadog_agent.obfuscate_sql(row['query'])
         except Exception as e:
@@ -445,6 +449,7 @@ class PostgresStatementSamples(object):
                         "signature": plan_signature,
                         "collection_error": collection_error,
                     },
+                    "statement_truncated": self._is_statement_truncated(max_query_size, row),
                     "query_signature": query_signature,
                     "resource_hash": query_signature,
                     "application": row.get('application_name', None),
@@ -466,10 +471,10 @@ class PostgresStatementSamples(object):
                         event['timestamp'] = get_timestamp(row['state_change']) * 1000
             return event
 
-    def _explain_pg_stat_activity(self, rows):
+    def _explain_pg_stat_activity(self, max_query_size, rows):
         for row in rows:
             try:
-                event = self._collect_plan_for_statement(row)
+                event = self._collect_plan_for_statement(max_query_size, row)
                 if event:
                     yield event
             except Exception:
@@ -481,3 +486,19 @@ class PostgresStatementSamples(object):
                     1,
                     tags=self._tags + ["error:collect-plan-for-statement-crash"],
                 )
+
+    def _get_query_max_text_size(self):
+        with self._get_db(self._config.dbname).cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            self._log.debug("Running query [%s]", MAX_ACTIVITY_QUERY_SIZE_QUERY)
+            cursor.execute(MAX_ACTIVITY_QUERY_SIZE_QUERY)
+            row = cursor.fetchone()
+            return int(row['setting'])
+
+    @staticmethod
+    def _is_statement_truncated(max_query_size, row):
+        # Compare the query length to the configured max query size to determine
+        # if the query has been truncated. Note that the length of a truncated statement
+        # is one less than the value of 'track_activity_query_size'. One caveat is that if a statement
+        # happens to have *exactly* the same length as the max configured but isn't actually truncated, this
+        # would falsely report it as a truncated statement
+        return sys.getsizeof(row['query']) >= max_query_size - 1

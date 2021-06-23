@@ -410,8 +410,8 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
 @pytest.mark.parametrize(
     "user,password,dbname,query,arg,expected_error_tag,expected_collection_error",
     [
-        ("bob", "bob", "datadog_test", "SELECT city FROM persons WHERE city = %s", "hello", None, None),
-        ("dd_admin", "dd_admin", "dogs", "SELECT * FROM breed WHERE name = %s", "Labrador", None, None),
+        ("bob", "bob", "datadog_test", "SELECT city FROM persons WHERE city = %s", "hello", None, None, False),
+        ("dd_admin", "dd_admin", "dogs", "SELECT * FROM breed WHERE name = %s", "Labrador", None, None, False),
         (
             "dd_admin",
             "dd_admin",
@@ -420,6 +420,7 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
             123,
             "error:explain-{}".format(DBExplainError.invalid_schema),
             {'code': 'invalid_schema', 'message': "<class 'psycopg2.errors.InvalidSchemaName'>"},
+            False,
         ),
         (
             "dd_admin",
@@ -428,7 +429,27 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
             "SELECT * FROM kennel WHERE id = %s",
             123,
             "error:explain-{}".format(DBExplainError.failed_function),
+            False,
+        ),
+        (
+            "bob",
+            "bob",
+            "datadog_test",
+            "SELECT city as city0, city as city1, city as city2, city as city3, "
+            "city as city4, city as city5, city as city6, city as city7, city as city8, city as city9, "
+            "city as city10, city as city11, city as city12, city as city13, city as city14, city as city15, "
+            "city as city16, city as city17, city as city18, city as city19, city as city20, city as city21, "
+            "city as city22, city as city23, city as city24, city as city25, city as city26, city as city27, "
+            "city as city28, city as city29, city as city30, city as city31, city as city32, city as city33, "
+            "city as city34, city as city35, city as city36, city as city37, city as city38, city as city39, "
+            "city as city40, city as city41, city as city42, city as city43, city as city44, city as city45, "
+            "city as city46, city as city47, city as city48, city as city49, city as city50, city as city51, "
+            "city as city52, city as city53, city as city54, city as city55, city as city56, city as city57, "
+            "city as city58, city as city59, city as city60, city as city61, city as city62, city as city63, "
+            "city as city64 FROM persons WHERE city = %s",
+            "hello",
             {'code': 'failed_function', 'message': "<class 'psycopg2.errors.UndefinedFunction'>"},
+            True,
         ),
     ],
 )
@@ -444,6 +465,7 @@ def test_statement_samples_collect(
     arg,
     expected_error_tag,
     expected_collection_error,
+    expected_statement_truncated,
 ):
     dbm_instance['pg_stat_activity_view'] = pg_stat_activity_view
     check = integration_check(dbm_instance)
@@ -467,7 +489,10 @@ def test_statement_samples_collect(
         dbm_samples = aggregator.get_event_platform_events("dbm-samples")
 
         expected_query = query % ('\'' + arg + '\'' if isinstance(arg, str) else arg)
-        matching = [e for e in dbm_samples if e['db']['statement'] == expected_query]
+        # Since the default postgres configuration for track_activity_query_size is 1024 which results
+        # in a max of 1023 bytes for the query text, the matching only considers the first 1023 characters to evaluate
+        # a match with potentially truncated queries
+        matching = [e for e in dbm_samples if e['db']['statement'] == expected_query[:1023]]
 
         if POSTGRES_VERSION.split('.')[0] == "9" and pg_stat_activity_view == "pg_stat_activity":
             # pg_monitor role exists only in version 10+
@@ -476,6 +501,7 @@ def test_statement_samples_collect(
 
         assert len(matching) == 1, "missing captured event"
         event = matching[0]
+        assert event['db']['statement_truncated'] == expected_statement_truncated
 
         if expected_error_tag:
             assert event['db']['plan']['definition'] is None, "did not expect to collect an execution plan"
