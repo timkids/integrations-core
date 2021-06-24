@@ -408,7 +408,7 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
 
 @pytest.mark.parametrize("pg_stat_activity_view", ["pg_stat_activity", "datadog.pg_stat_activity()"])
 @pytest.mark.parametrize(
-    "user,password,dbname,query,arg,expected_error_tag,expected_collection_error",
+    "user,password,dbname,query,arg,expected_error_tag,expected_collection_error,expected_statement_truncated",
     [
         ("bob", "bob", "datadog_test", "SELECT city FROM persons WHERE city = %s", "hello", None, None, False),
         ("dd_admin", "dd_admin", "dogs", "SELECT * FROM breed WHERE name = %s", "Labrador", None, None, False),
@@ -429,6 +429,7 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
             "SELECT * FROM kennel WHERE id = %s",
             123,
             "error:explain-{}".format(DBExplainError.failed_function),
+            {'code': 'failed_function', 'message': "<class 'psycopg2.errors.UndefinedFunction'>"},
             False,
         ),
         (
@@ -448,7 +449,8 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
             "city as city58, city as city59, city as city60, city as city61, city as city62, city as city63, "
             "city as city64 FROM persons WHERE city = %s",
             "hello",
-            {'code': 'failed_function', 'message': "<class 'psycopg2.errors.UndefinedFunction'>"},
+            "error:explain-{}".format(DBExplainError.statement_truncated),
+            {'code': 'statement_truncated', 'message': None},
             True,
         ),
     ],

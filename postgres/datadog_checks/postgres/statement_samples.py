@@ -75,6 +75,9 @@ class DBExplainError(Enum):
     # there could be a problem with the EXPLAIN function (missing, invalid permissions, or an incorrect definition)
     failed_function = 'failed_function'
 
+    # a truncated statement can't be explained
+    statement_truncated = "statement_truncated"
+
 
 class PostgresStatementSamples(object):
     """
@@ -364,10 +367,18 @@ class PostgresStatementSamples(object):
                 return None
             return result[0][0]
 
-    def _run_explain_safe(self, dbname, statement, obfuscated_statement):
-        # type: (str, str, str) -> Tuple[Optional[Dict], Optional[DBExplainError], Optional[Exception]]
+    def _run_explain_safe(self, max_query_size, dbname, statement, obfuscated_statement):
+        # type: (int, str, str, str) -> Tuple[Optional[Dict], Optional[DBExplainError], Optional[Exception]]
         if not self._can_explain_statement(obfuscated_statement):
             return None, DBExplainError.no_plans_possible, None
+
+        if self._is_statement_truncated(max_query_size, statement):
+            self._check.count(
+                "dd.postgres.statement_samples.error",
+                1,
+                tags=self._dbtags(dbname, "error:explain-{}".format(DBExplainError.statement_truncated)),
+            )
+            return None, DBExplainError.statement_truncated, None
 
         db_explain_error, err = self._get_db_explain_setup_state_cached(dbname)
         if db_explain_error is not None:
@@ -411,7 +422,9 @@ class PostgresStatementSamples(object):
         # - `plan_signature` - hash computed from the normalized JSON plan to group identical plan trees
         # - `resource_hash` - hash computed off the raw sql text to match apm resources
         # - `query_signature` - hash computed from the raw sql text to match query metrics
-        plan_dict, explain_err_code, err = self._run_explain_safe(row['datname'], row['query'], obfuscated_statement)
+        plan_dict, explain_err_code, err = self._run_explain_safe(
+            max_query_size, row['datname'], row['query'], obfuscated_statement
+        )
         collection_error = None
         if explain_err_code:
             collection_error = {'code': explain_err_code.value, 'message': '{}'.format(type(err)) if err else None}
@@ -449,7 +462,7 @@ class PostgresStatementSamples(object):
                         "signature": plan_signature,
                         "collection_error": collection_error,
                     },
-                    "statement_truncated": self._is_statement_truncated(max_query_size, row),
+                    "statement_truncated": self._is_statement_truncated(max_query_size, row['query']),
                     "query_signature": query_signature,
                     "resource_hash": query_signature,
                     "application": row.get('application_name', None),
@@ -495,10 +508,10 @@ class PostgresStatementSamples(object):
             return int(row['setting'])
 
     @staticmethod
-    def _is_statement_truncated(max_query_size, row):
+    def _is_statement_truncated(max_query_size, statement):
         # Compare the query length to the configured max query size to determine
         # if the query has been truncated. Note that the length of a truncated statement
         # is one less than the value of 'track_activity_query_size'. One caveat is that if a statement
         # happens to have *exactly* the same length as the max configured but isn't actually truncated, this
         # would falsely report it as a truncated statement
-        return sys.getsizeof(row['query']) >= max_query_size - 1
+        return sys.getsizeof(statement) >= max_query_size - 1
