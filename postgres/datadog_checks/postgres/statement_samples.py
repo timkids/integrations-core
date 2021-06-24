@@ -462,12 +462,12 @@ class PostgresStatementSamples(object):
                         "signature": plan_signature,
                         "collection_error": collection_error,
                     },
-                    "statement_truncated": self._is_statement_truncated(max_query_size, row['query']),
                     "query_signature": query_signature,
                     "resource_hash": query_signature,
                     "application": row.get('application_name', None),
                     "user": row['usename'],
                     "statement": obfuscated_statement,
+                    "statement_truncated": self._is_statement_truncated(max_query_size, row['query']),
                 },
                 'postgres': {k: v for k, v in row.items() if k not in pg_stat_activity_sample_exclude_keys},
             }
