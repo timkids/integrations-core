@@ -52,7 +52,7 @@ PG_STAT_ACTIVITY_QUERY = re.sub(
 
 EXPLAIN_VALIDATION_QUERY = "SELECT * FROM pg_stat_activity"
 
-MAX_ACTIVITY_QUERY_SIZE_QUERY = "select setting from pg_settings where name='track_activity_query_size'"
+MAX_ACTIVITY_QUERY_SIZE_QUERY = "SELECT setting FROM pg_settings WHERE name='track_activity_query_size'"
 
 
 class DBExplainError(Enum):
