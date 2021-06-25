@@ -9,6 +9,7 @@ import mock
 import psycopg2
 import pytest
 from semver import VersionInfo
+from six import string_types
 
 from datadog_checks.base.utils.db.sql import compute_sql_signature
 from datadog_checks.base.utils.serialization import json
@@ -436,7 +437,7 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
             "bob",
             "bob",
             "datadog_test",
-            "SELECT city as city0, city as city1, city as city2, city as city3, "
+            u"SELECT city as city0, city as city1, city as city2, city as city3, "
             "city as city4, city as city5, city as city6, city as city7, city as city8, city as city9, "
             "city as city10, city as city11, city as city12, city as city13, city as city14, city as city15, "
             "city as city16, city as city17, city as city18, city as city19, city as city20, city as city21, "
@@ -446,11 +447,13 @@ def test_get_db_explain_setup_state(integration_check, dbm_instance, dbname, exp
             "city as city40, city as city41, city as city42, city as city43, city as city44, city as city45, "
             "city as city46, city as city47, city as city48, city as city49, city as city50, city as city51, "
             "city as city52, city as city53, city as city54, city as city55, city as city56, city as city57, "
-            "city as city58, city as city59, city as city60, city as city61, city as city62, city as city63, "
-            "city as city64 FROM persons WHERE city = %s",
-            "hello",
+            "city as city58, city as city59, city as city60, city as city61 "
+            "FROM persons WHERE city = %s",
+            # Use some multi-byte characters (the euro symbol) so we can validate that the code is correctly
+            # looking at the length in bytes when testing for truncated statements
+            u'\u20AC\u20AC\u20AC\u20AC\u20AC\u20AC\u20AC\u20AC\u20AC\u20AC',
             "error:explain-{}".format(DBExplainError.statement_truncated),
-            {'code': 'statement_truncated', 'message': None},
+            {'code': 'statement_truncated', 'message': 'statement truncated with track_activity_query_size=1024'},
             True,
         ),
     ],
@@ -490,11 +493,13 @@ def test_statement_samples_collect(
         check.check(dbm_instance)
         dbm_samples = aggregator.get_event_platform_events("dbm-samples")
 
-        expected_query = query % ('\'' + arg + '\'' if isinstance(arg, str) else arg)
-        # Since the default postgres configuration for track_activity_query_size is 1024 which results
-        # in a max of 1023 bytes for the query text, the matching only considers the first 1023 characters to evaluate
-        # a match with potentially truncated queries
-        matching = [e for e in dbm_samples if e['db']['statement'] == expected_query[:1023]]
+        expected_query = query % ('\'' + arg + '\'' if isinstance(arg, string_types) else arg)
+
+        # Find matching events by checking if the expected query starts with the event statement. Using this
+        # instead of a direct equality check covers cases of truncated statements
+        matching = [
+            e for e in dbm_samples if expected_query.encode("utf-8").startswith(e['db']['statement'].encode("utf-8"))
+        ]
 
         if POSTGRES_VERSION.split('.')[0] == "9" and pg_stat_activity_view == "pg_stat_activity":
             # pg_monitor role exists only in version 10+
@@ -542,7 +547,7 @@ def test_statement_samples_dbstrict(aggregator, integration_check, dbm_instance,
     dbm_samples = aggregator.get_event_platform_events("dbm-samples")
 
     for _, _, dbname, query, arg in SAMPLE_QUERIES:
-        expected_query = query % ('\'' + arg + '\'' if isinstance(arg, str) else arg)
+        expected_query = query % ('\'' + arg + '\'' if isinstance(arg, string_types) else arg)
         matching = [e for e in dbm_samples if e['db']['statement'] == expected_query]
         if not dbstrict or dbname == dbm_instance['dbname']:
             # when dbstrict=True we expect to only capture those queries for the initial database to which the

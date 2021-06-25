@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import sys
 import threading
 import time
 from concurrent.futures.thread import ThreadPoolExecutor
@@ -10,6 +9,7 @@ from typing import Dict, Optional, Tuple
 
 import psycopg2
 from cachetools import TTLCache
+from six import PY2
 
 try:
     import datadog_agent
@@ -22,6 +22,10 @@ from datadog_checks.base.utils.db.sql import compute_exec_plan_signature, comput
 from datadog_checks.base.utils.db.utils import ConstantRateLimiter, default_json_event_encoding, resolve_db_host
 from datadog_checks.base.utils.serialization import json
 from datadog_checks.base.utils.time import get_timestamp
+
+# according to https://unicodebook.readthedocs.io/unicode_encodings.html, the max supported size of a UTF-8 encoded
+# character is 6 bytes
+MAX_CHARACTER_SIZE_IN_BYTES = 6
 
 SUPPORTED_EXPLAIN_STATEMENTS = frozenset({'select', 'table', 'delete', 'insert', 'replace', 'update'})
 
@@ -368,7 +372,7 @@ class PostgresStatementSamples(object):
             return result[0][0]
 
     def _run_explain_safe(self, max_query_size, dbname, statement, obfuscated_statement):
-        # type: (int, str, str, str) -> Tuple[Optional[Dict], Optional[DBExplainError], Optional[Exception]]
+        # type: (int, str, str, str) -> Tuple[Optional[Dict], Optional[DBExplainError], Optional[str]]
         if not self._can_explain_statement(obfuscated_statement):
             return None, DBExplainError.no_plans_possible, None
 
@@ -378,7 +382,11 @@ class PostgresStatementSamples(object):
                 1,
                 tags=self._dbtags(dbname, "error:explain-{}".format(DBExplainError.statement_truncated)),
             )
-            return None, DBExplainError.statement_truncated, None
+            return (
+                None,
+                DBExplainError.statement_truncated,
+                "statement truncated with track_activity_query_size={}".format(max_query_size),
+            )
 
         db_explain_error, err = self._get_db_explain_setup_state_cached(dbname)
         if db_explain_error is not None:
@@ -387,7 +395,7 @@ class PostgresStatementSamples(object):
                 1,
                 tags=self._dbtags(dbname, "error:explain-{}".format(db_explain_error)),
             )
-            return None, db_explain_error, err
+            return None, db_explain_error, type(err)
 
         try:
             return self._run_explain(dbname, statement, obfuscated_statement), None, None
@@ -398,7 +406,7 @@ class PostgresStatementSamples(object):
                 1,
                 tags=self._dbtags(dbname, "error:explain-{}".format(type(e))),
             )
-            return None, DBExplainError.database_error, e
+            return None, DBExplainError.database_error, type(e)
 
     def _collect_plan_for_statement(self, max_query_size, row):
         try:
@@ -422,12 +430,12 @@ class PostgresStatementSamples(object):
         # - `plan_signature` - hash computed from the normalized JSON plan to group identical plan trees
         # - `resource_hash` - hash computed off the raw sql text to match apm resources
         # - `query_signature` - hash computed from the raw sql text to match query metrics
-        plan_dict, explain_err_code, err = self._run_explain_safe(
+        plan_dict, explain_err_code, err_msg = self._run_explain_safe(
             max_query_size, row['datname'], row['query'], obfuscated_statement
         )
         collection_error = None
         if explain_err_code:
-            collection_error = {'code': explain_err_code.value, 'message': '{}'.format(type(err)) if err else None}
+            collection_error = {'code': explain_err_code.value, 'message': '{}'.format(err_msg) if err_msg else None}
 
         plan, normalized_plan, obfuscated_plan, plan_signature, plan_cost = None, None, None, None, None
         if plan_dict:
@@ -509,9 +517,11 @@ class PostgresStatementSamples(object):
 
     @staticmethod
     def _is_statement_truncated(max_query_size, statement):
-        # Compare the query length to the configured max query size to determine
+        # Compare the query length (in bytes to match Postgres) to the configured max query size to determine
         # if the query has been truncated. Note that the length of a truncated statement
-        # is one less than the value of 'track_activity_query_size'. One caveat is that if a statement
-        # happens to have *exactly* the same length as the max configured but isn't actually truncated, this
+        # can be less than the value of 'track_activity_query_size' by MAX_CHARACTER_SIZE_IN_BYTES + 1 because
+        # multi-byte characters that fall on the limit are left out. One caveat is that if a statement's length
+        # happens to be greater or equal to the threshold below but isn't actually truncated, this
         # would falsely report it as a truncated statement
-        return sys.getsizeof(statement) >= max_query_size - 1
+        statement_bytes = bytes(statement) if PY2 else bytes(statement, "utf-8")
+        return len(statement_bytes) >= max_query_size - (MAX_CHARACTER_SIZE_IN_BYTES + 1)
